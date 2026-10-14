@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { LECTURES, buildQuiz, filterQuestions, type Question, type QuizItem } from "./lib/quiz";
+import { LECTURES, buildQuiz, filterQuestions, scheduleRetry, type Question, type QuizItem } from "./lib/quiz";
 
 
 type Mode = "train" | "exam";
-type Source = "all" | "rk1" | "extra";
+type Source = "all" | "numbers" | "longest" | "other";
 type Answer = { id: string; chosen: number };
 type HistoryEntry = { date: number; mode: Mode; score: number; total: number; seconds: number };
 
@@ -34,7 +34,7 @@ export default function App() {
   useEffect(() => {
     fetch("/questions.json").then((r) => { if (!r.ok) throw new Error("Не удалось загрузить вопросы"); return r.json(); }).then(setAll).catch(() => setError("Не удалось загрузить вопросы. Обновите страницу."));
     setHistory(load(HKEY, []));
-    setMistakes(load(MKEY, []));
+    setMistakes(load<string[]>(MKEY, []).filter(id => id.startsWith("rk-")));
   }, []);
 
   useEffect(() => {
@@ -57,13 +57,9 @@ export default function App() {
     const score = ans.filter((a, i) => a.chosen === items[i]!.q.a).length;
     const entry: HistoryEntry = { date: Date.now(), mode, score, total: items.length, seconds };
     const h = [entry, ...history].slice(0, 30);
-    const wrong = new Set(mistakes);
-    ans.forEach((a, i) => (a.chosen === items[i]!.q.a ? wrong.delete(a.id) : wrong.add(a.id)));
-    const m = [...wrong];
-    setHistory(h); setMistakes(m);
+    setHistory(h);
     try {
       localStorage.setItem(HKEY, JSON.stringify(h));
-      localStorage.setItem(MKEY, JSON.stringify(m));
     } catch { /* Quiz remains usable when storage is unavailable. */ }
     setScreen("result");
     window.scrollTo(0, 0);
@@ -73,6 +69,15 @@ export default function App() {
     if (answers[idx]) return;
     const next = [...answers, { id: items[idx]!.q.id, chosen: key }];
     setAnswers(next);
+    const wrong = new Set(mistakes);
+    const good = key === items[idx]!.q.a;
+    if (good) wrong.delete(items[idx]!.q.id); else wrong.add(items[idx]!.q.id);
+    const remaining = [...wrong];
+    setMistakes(remaining);
+    try { localStorage.setItem(MKEY, JSON.stringify(remaining)); } catch {}
+    if (!good && mode === "train") {
+      setItems(scheduleRetry(items, idx, pool.length > 1 ? pool : all.filter(q => lectures.includes(q.l)), shO));
+    }
     if (mode === "exam") {
       if (idx + 1 < items.length) setIdx(idx + 1);
       else finish(next);
@@ -91,11 +96,11 @@ export default function App() {
       </header>
       <main className="mx-auto max-w-3xl px-5 pb-20">
         {error && <p role="alert" className="card-soft p-6 text-destructive">{error}</p>}
-        {!all.length && !error && <p role="status">Загружаем все 154 вопроса…</p>}
+        {!all.length && !error && <p role="status">Загружаем все 122 вопроса…</p>}
         {screen === "setup" && (
           <Setup {...{ all, pool, lectures, setLectures, source, setSource, count, setCount, mode, setMode, shQ, setShQ, shO, setShO, history, mistakes }}
             onStart={() => start(pool)}
-            onMistakes={() => start(all.filter((q) => mistakes.includes(q.id)), "train")}
+            onMistakes={() => start(all.filter((q) => lectures.includes(q.l) && mistakes.includes(q.id)), "train")}
             onClear={() => { try { localStorage.removeItem(HKEY); localStorage.removeItem(MKEY); } catch {} setHistory([]); setMistakes([]); }} />
         )}
         {screen === "quiz" && items[idx] && (
@@ -104,7 +109,7 @@ export default function App() {
         )}
         {screen === "result" && (
           <Result items={items} answers={answers} seconds={seconds} mode={mode}
-            onRetryWrong={() => start(items.filter((it, i) => answers[i]?.chosen !== it.q.a).map((it) => it.q), "train")}
+            onRetryWrong={() => start(all.filter(q => mistakes.includes(q.id) && items.some(it => it.q.id === q.id)), "train")}
             onRestart={() => start(pool)} onHome={() => setScreen("setup")} />
         )}
       </main>
@@ -136,7 +141,7 @@ function Setup(p: {
         <h1 className="text-4xl font-bold leading-tight sm:text-5xl">
           Готовься к РК1 <br />на <span className="bg-accent px-2 text-accent-foreground">практике</span>
         </h1>
-        <p className="mt-4 max-w-lg text-muted-foreground">{p.all.length} вопросов по шести лекциям основ права Казахстана. Тренировка с пояснениями или экзамен с разбором.</p>
+        <p className="mt-4 max-w-lg text-muted-foreground">{p.all.length} вопросов по шести лекциям основ права Казахстана. Тренировка с повтором ошибок через два вопроса или экзамен с разбором.</p>
       </section>
 
       <section className="card-soft space-y-3 p-6">
@@ -164,8 +169,9 @@ function Setup(p: {
       </section>
 
       <section className="card-soft grid gap-5 p-6 sm:grid-cols-2">
-        <div className="space-y-2"><h2 className="text-sm font-bold uppercase tracking-wider">Источник</h2>
-          <Seg value={p.source} set={p.setSource} opts={[["all", "Все"], ["rk1", "РК1"], ["extra", "Дополнительный"]]} /></div>
+        <div className="space-y-2"><h2 className="text-sm font-bold uppercase tracking-wider">Подборка вопросов</h2>
+          <Seg value={p.source} set={p.setSource} opts={[["all", "Все РК1"], ["numbers", "Статьи и числа"], ["longest", "Длинный ответ"], ["other", "Остальные"]]} />
+          <p className="text-xs text-muted-foreground">Статьи и числа — ответы с номерами, датами и сроками. Длинный ответ — правильный вариант длиннее остальных. Подборки не пересекаются.</p></div>
         <div className="space-y-2"><h2 className="text-sm font-bold uppercase tracking-wider">Количество</h2>
           <Seg value={p.count} set={p.setCount} opts={[[10, "10"], [20, "20"], [30, "30"], ["all", "Все"]]} /></div>
         <div className="space-y-2"><h2 className="text-sm font-bold uppercase tracking-wider">Режим</h2>
@@ -182,13 +188,14 @@ function Setup(p: {
           className="flex-1 rounded-2xl bg-primary px-6 py-4 text-lg font-bold text-primary-foreground transition hover:-translate-y-0.5 disabled:opacity-40">
           Начать · {n} {p.mode === "exam" ? "экзамен" : "тренировка"}
         </button>
-        {p.mistakes.length > 0 && (
-          <button onClick={p.onMistakes} className="rounded-2xl bg-accent px-6 py-4 font-bold text-accent-foreground transition hover:-translate-y-0.5">
-            Повторить ошибки · {p.mistakes.length}
+        {(
+          <button disabled={!p.all.some(q => p.lectures.includes(q.l) && p.mistakes.includes(q.id))} onClick={p.onMistakes} className="rounded-2xl bg-accent px-6 py-4 font-bold text-accent-foreground transition hover:-translate-y-0.5 disabled:opacity-40">
+            Работа над ошибками · {p.all.filter(q => p.lectures.includes(q.l) && p.mistakes.includes(q.id)).length}
           </button>
         )}
       </div>
 
+      <p className="text-sm text-muted-foreground">В тренировке ошибочный вопрос вернётся после двух других. Ошибки сохраняются сразу, даже если выйти до конца. В работе над ошибками тренируешься до правильного ответа.</p>
       {p.history.length > 0 && (
         <section className="card-soft p-6">
           <div className="mb-3 flex items-center justify-between">
@@ -227,7 +234,7 @@ function Quiz({ item, idx, total, mode, seconds, answer, onChoose, onNext, onExi
       <div className="card-soft p-6 sm:p-8">
         <div className="mb-3 flex flex-wrap gap-2 text-xs font-semibold text-muted-foreground">
           <span className="rounded-full bg-secondary px-2.5 py-1">{LECTURES[item.q.l]}</span>
-          <span className="rounded-full bg-secondary px-2.5 py-1">{item.q.source}</span>
+          <span className="rounded-full bg-secondary px-2.5 py-1">{item.retry ? "Повтор ошибки — попробуй снова" : item.q.source}</span>
         </div>
         <h2 className="font-sans text-xl font-bold leading-snug sm:text-2xl">{item.q.q}</h2>
         <div className="mt-6 space-y-2.5">
@@ -247,6 +254,7 @@ function Quiz({ item, idx, total, mode, seconds, answer, onChoose, onNext, onExi
           <div className="mt-5 rounded-2xl bg-secondary p-4 text-sm">
             <p className="font-bold">{answer!.chosen === item.q.a ? "Верно!" : `Неверно. Правильно: ${item.q.o[item.q.a]}`}</p>
             {item.q.e && <p className="mt-1 text-muted-foreground">{item.q.e}</p>}
+            {answer!.chosen !== item.q.a && <p className="mt-2">Этот вопрос вернётся после двух других.</p>}
           </div>
         )}
       </div>
@@ -263,7 +271,7 @@ function Result({ items, answers, seconds, mode, onRetryWrong, onRestart, onHome
   items: QuizItem[]; answers: Answer[]; seconds: number; mode: Mode; onRetryWrong: () => void; onRestart: () => void; onHome: () => void;
 }) {
   const score = answers.filter((a, i) => a.chosen === items[i]!.q.a).length;
-  const wrong = items.length - score;
+  const wrong = new Set(items.filter(it => [...answers].reverse().find(a => a.id === it.q.id)?.chosen !== it.q.a).map(it => it.q.id)).size;
   const pct = Math.round((score / items.length) * 100);
   return (
     <div className="space-y-6">
@@ -282,7 +290,7 @@ function Result({ items, answers, seconds, mode, onRetryWrong, onRestart, onHome
         {items.map((it, i) => {
           const ch = answers[i]?.chosen, ok = ch === it.q.a;
           return (
-            <li key={it.q.id} className="card-soft p-5">
+            <li key={`${it.q.id}-${i}`} className="card-soft p-5">
               <p className="font-bold"><span className={ok ? "rounded bg-success px-1.5" : "rounded bg-destructive-soft px-1.5"}>{i + 1}</span> {it.q.q}</p>
               {!ok && <p className="mt-2 text-sm"><span className="text-muted-foreground">Ваш ответ: </span><span className="text-destructive line-through">{ch !== undefined ? it.q.o[ch] : "—"}</span></p>}
               <p className="mt-1 text-sm"><span className="text-muted-foreground">Правильно: </span><b>{it.q.o[it.q.a]}</b></p>
